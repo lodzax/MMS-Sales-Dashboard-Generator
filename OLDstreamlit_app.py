@@ -183,7 +183,7 @@ fig_sales.update_layout(
         tickfont=dict(size=10)
     )
 )
-st.plotly_chart(fig_sales, width='stretch')  # replaced use_container_width
+st.plotly_chart(fig_sales, use_container_width=True)  # deprecated, but will be auto‑converted
 
 # Chart 2: Invoices by Sales Rep (bottom) – sorted by invoice count descending
 st.subheader("📊 Invoices by Sales Rep (Largest to Smallest)")
@@ -208,7 +208,7 @@ fig_invoices.update_layout(
         tickfont=dict(size=10)
     )
 )
-st.plotly_chart(fig_invoices, width='stretch')  # replaced use_container_width
+st.plotly_chart(fig_invoices, use_container_width=True)  # deprecated, but will be auto‑converted
 
 st.markdown("---")
 
