@@ -394,7 +394,7 @@ with st.sidebar:
 async def generate_pdf_from_html(html_content: str) -> bytes:
     """Render HTML and generate PDF using Playwright."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         page = await browser.new_page()
         await page.set_content(html_content, wait_until="networkidle")
         # Wait extra for charts to render
