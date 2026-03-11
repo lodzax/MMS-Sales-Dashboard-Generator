@@ -69,7 +69,7 @@ with st.sidebar:
     1. Upload your **MMS Sales Tracker.xlsx** file.
     2. The dashboard will automatically update with:
        - Key metrics (actual totals)
-       - Charts by sales rep (collaborative invoices split equally)
+       - Charts by sales rep (collaborative invoices count for each rep)
        - Detailed summary table
     3. Download the summary as CSV or the full dashboard as interactive HTML.
     4. **Export as PDF** – captures a static PDF of the current dashboard.
@@ -88,27 +88,15 @@ def process_uploaded_file(uploaded_file):
         # Clean and prepare
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
         df = df.dropna(subset=['Amount', 'Sales Rep Number'])
-        
         # Keep original for overall metrics (no splitting)
         df_original = df.copy()
-        
-        # For per-rep analysis, split amounts equally among collaborating reps
+        # For per-rep analysis, split multiple reps separated by semicolon
         df_exploded = df.copy()
-        # Convert to string and count reps per invoice
-        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(str)
-        df_exploded['rep_count'] = df_exploded['Sales Rep Number'].str.split(';').apply(len)
-        
-        # Split the rep numbers
-        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.split(';')
+        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(str).str.split(';')
         df_exploded = df_exploded.explode('Sales Rep Number')
         df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.strip()
-        
         # Drop any empty strings after splitting
         df_exploded = df_exploded[df_exploded['Sales Rep Number'] != '']
-        
-        # Calculate split amount (equal share)
-        df_exploded['Split Amount'] = df_exploded['Amount'] / df_exploded['rep_count']
-        
         return df_original, df_exploded
     except Exception as e:
         st.error(f"Error reading file: {e}")
@@ -128,10 +116,10 @@ total_sales = df_original['Amount'].sum()
 total_invoices = len(df_original)
 total_sales_reps = df_exploded['Sales Rep Number'].nunique()  # unique reps after splitting
 
-# Per-rep aggregation using exploded data (split amounts)
+# Per-rep aggregation using exploded data
 rep_stats = df_exploded.groupby('Sales Rep Number').agg(
     invoice_count=('Invoice Number', 'count'),
-    total_sales=('Split Amount', 'sum')
+    total_sales=('Amount', 'sum')
 ).reset_index()
 
 # Sort for sales chart and table (by total sales descending)
@@ -195,7 +183,7 @@ fig_sales.update_layout(
         tickfont=dict(size=10)
     )
 )
-st.plotly_chart(fig_sales, width='stretch')
+st.plotly_chart(fig_sales, width='stretch')  # replaced use_container_width
 
 # Chart 2: Invoices by Sales Rep (bottom) – sorted by invoice count descending
 st.subheader("📊 Invoices by Sales Rep (Largest to Smallest)")
@@ -220,7 +208,7 @@ fig_invoices.update_layout(
         tickfont=dict(size=10)
     )
 )
-st.plotly_chart(fig_invoices, width='stretch')
+st.plotly_chart(fig_invoices, width='stretch')  # replaced use_container_width
 
 st.markdown("---")
 
@@ -234,7 +222,7 @@ display_df.columns = ['Sales Rep', 'Total Invoices', 'Total Sales']
 # Use st.dataframe with updated width parameter
 st.dataframe(
     display_df,
-    width='stretch',
+    width='stretch',  # replaces use_container_width=True
     hide_index=True,
     column_config={
         "Sales Rep": st.column_config.TextColumn("Sales Rep"),
@@ -406,7 +394,7 @@ with st.sidebar:
 async def generate_pdf_from_html(html_content: str) -> bytes:
     """Render HTML and generate PDF using Playwright."""
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         page = await browser.new_page()
         await page.set_content(html_content, wait_until="networkidle")
         # Wait extra for charts to render
@@ -438,6 +426,6 @@ with st.sidebar:
                 st.download_button(
                     label="📥 Download PDF",
                     data=pdf_bytes,
-                    file_name="mms_sales_dashboard.pdf",
+                    file_name="mms_dashboard.pdf",
                     mime="application/pdf"
                 )
