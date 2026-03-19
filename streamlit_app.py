@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+
 import asyncio
 import sys
 from playwright.async_api import async_playwright
