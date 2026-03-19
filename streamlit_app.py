@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 
 import asyncio
 import sys
@@ -136,10 +137,14 @@ def process_deductions_file(uploaded_file):
 if uploaded_file is not None:
     df_sales_orig, df_sales_exp = process_sales_file(uploaded_file)
     if df_sales_orig is None or df_sales_exp is None:
+        # If parsing fails, stop the Streamlit script (and exit if running as a plain script).
         st.stop()
+        sys.exit(0)
 else:
     st.info("👈 Please upload an MMS Sales Tracker Excel file using the sidebar to begin.")
+    # When running as a plain script (not via `streamlit run`), st.stop() may not terminate execution.
     st.stop()
+    sys.exit(0)
 
 # Load deductions data if provided
 if deductions_file is not None:
