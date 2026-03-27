@@ -101,7 +101,7 @@ with st.sidebar:
 st.title("📊 MMS Sales Dashboard")
 st.markdown("---")
 
-# ========== DATA PROCESSING FUNCTIONS ==========
+# ========== DATA PROCESSING FUNCTIONS (UPDATED) ==========
 def process_sales_file(uploaded_file):
     """Reads the sales Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
     try:
@@ -175,6 +175,8 @@ if uploaded_file is not None:
         st.stop()
 elif 'api_data' in st.session_state and st.session_state.api_data is not None:
     # Use the API data if it exists
+    # We must pass the raw DataFrame through the cleaning function
+    # Because process_sales_file expects a file-like object, we'll create a BytesIO
     buffer = io.BytesIO()
     st.session_state.api_data.to_excel(buffer, index=False)
     buffer.seek(0)
@@ -458,36 +460,6 @@ if not df_sales_orig_filtered.empty:
 else:
     st.info("No invoices for the selected filters.")
 
-# ========== DUPLICATE INVOICES SECTION ==========
-st.markdown("---")
-st.subheader("⚠️ Duplicate Invoices")
-if not df_sales_orig_filtered.empty:
-    # Identify invoice numbers that appear more than once
-    duplicate_mask = df_sales_orig_filtered.duplicated(subset=['Invoice Number'], keep=False)
-    duplicates_df = df_sales_orig_filtered[duplicate_mask].copy()
-    if not duplicates_df.empty:
-        # Select and reorder columns for display
-        dup_display = duplicates_df[['Date', 'Sales Rep Number', 'Invoice Number', 'Amount']].copy()
-        dup_display['Date'] = dup_display['Date'].dt.date
-        dup_display['Amount'] = dup_display['Amount'].map('${:,.2f}'.format)
-        dup_display = dup_display.sort_values(['Invoice Number', 'Date'])
-        st.dataframe(
-            dup_display,
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "Date": st.column_config.DateColumn("Date"),
-                "Sales Rep Number": st.column_config.TextColumn("Sales Rep(s)"),
-                "Invoice Number": st.column_config.TextColumn("Invoice Number"),
-                "Amount": st.column_config.TextColumn("Amount"),
-            }
-        )
-        st.caption(f"Found {len(duplicates_df)} rows belonging to duplicate invoices.")
-    else:
-        st.success("No duplicate invoices found in the filtered data.")
-else:
-    st.info("No sales data to check for duplicates.")
-
 # ========== DEDUCTIONS SECTION (if deductions exist) ==========
 if has_deductions and not df_ded_exp_filtered.empty:
     st.markdown("---")
@@ -537,21 +509,6 @@ st.download_button(label="📥 Download Summary as CSV", data=csv, file_name="sa
 
 # ========== HTML EXPORT ==========
 def generate_export_html():
-    # Duplicate invoices HTML
-    if not df_sales_orig_filtered.empty:
-        dup_mask = df_sales_orig_filtered.duplicated(subset=['Invoice Number'], keep=False)
-        dup_df = df_sales_orig_filtered[dup_mask].copy()
-        if not dup_df.empty:
-            dup_display = dup_df[['Date', 'Sales Rep Number', 'Invoice Number', 'Amount']].copy()
-            dup_display['Date'] = dup_display['Date'].dt.date
-            dup_display['Amount'] = dup_display['Amount'].map('${:,.2f}'.format)
-            dup_display = dup_display.sort_values(['Invoice Number', 'Date'])
-            dup_html = dup_display.to_html(index=False, escape=False, classes='duplicate-table')
-        else:
-            dup_html = "<p>No duplicate invoices found.</p>"
-    else:
-        dup_html = "<p>No sales data to check for duplicates.</p>"
-
     # Combo chart HTML
     if not rep_stats_net_sales.empty:
         combo_html = fig_combo.to_html(include_plotlyjs=False, full_html=False)
@@ -677,24 +634,24 @@ def generate_export_html():
                 margin-bottom: 20px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             }}
-            .summary-table, .top-invoices-table, .deductions-table, .duplicate-table {{
+            .summary-table, .top-invoices-table, .deductions-table {{
                 width: 100%;
                 border-collapse: collapse;
             }}
-            .summary-table th, .top-invoices-table th, .deductions-table th, .duplicate-table th {{
+            .summary-table th, .top-invoices-table th, .deductions-table th {{
                 background-color: #1e3c72;
                 color: white;
                 padding: 12px;
                 text-align: left;
             }}
-            .summary-table td, .top-invoices-table td, .deductions-table td, .duplicate-table td {{
+            .summary-table td, .top-invoices-table td, .deductions-table td {{
                 padding: 10px 12px;
                 border-bottom: 1px solid #ddd;
             }}
-            .summary-table tr:nth-child(even), .top-invoices-table tr:nth-child(even), .deductions-table tr:nth-child(even), .duplicate-table tr:nth-child(even) {{
+            .summary-table tr:nth-child(even), .top-invoices-table tr:nth-child(even), .deductions-table tr:nth-child(even) {{
                 background-color: #f5f7fa;
             }}
-            .summary-table tr:hover, .top-invoices-table tr:hover, .deductions-table tr:hover, .duplicate-table tr:hover {{
+            .summary-table tr:hover, .top-invoices-table tr:hover, .deductions-table tr:hover {{
                 background-color: #e9ecef;
             }}
         </style>
@@ -736,15 +693,11 @@ def generate_export_html():
                 <h3>📋 Sales Rep Summary (Sorted by Net Sales)</h3>
                 {table_html}
             </div>
-            <div class="table-container">
-                <h3>⚠️ Duplicate Invoices</h3>
-                {dup_html}
-            </div>
+            {ded_section}
             <div class="table-container">
                 <h3>🏆 Top 10 Invoices by Amount (Original)</h3>
                 {top_invoices_html}
             </div>
-            {ded_section}
         </div>
     </body>
     </html>

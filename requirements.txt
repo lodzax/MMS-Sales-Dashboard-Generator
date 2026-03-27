@@ -4,3 +4,4 @@ plotly
 openpyxl
 playwright
 nest-asyncio
+requests
