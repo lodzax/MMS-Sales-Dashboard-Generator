@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import asyncio
 import sys
+import requests
+import io
 from playwright.async_api import async_playwright
 import nest_asyncio
 from datetime import datetime
@@ -59,7 +61,23 @@ with st.sidebar:
         type=["xlsx", "xls"],
         help="Select the Excel file exported from MMS Sales Tracker."
     )
-    
+
+    st.markdown("---")
+    st.header("🔗 KoboToolbox Import")
+    if st.button("Fetch from KoboToolbox"):
+        with st.spinner("Fetching data from KoboToolbox..."):
+            try:
+                url = "https://kf.kobotoolbox.org/api/v2/assets/ai5wFipp7kxWNA5RJd5jre/export-settings/esdqM5MrXnavHqJcgWRZwcc/data.xlsx"
+                response = requests.get(url)
+                response.raise_for_status()
+                df_raw = pd.read_excel(io.BytesIO(response.content))
+                st.session_state.api_data = df_raw
+                st.success("Data successfully loaded from KoboToolbox!")
+                st.session_state.manual_upload_used = False
+            except Exception as e:
+                st.error(f"Failed to fetch data from KoboToolbox: {e}")
+                st.session_state.api_data = None
+
     st.markdown("---")
     st.header("📉 Deductions")
     deductions_file = st.file_uploader(
@@ -67,11 +85,11 @@ with st.sidebar:
         type=["xlsx", "xls"],
         help="File with columns: Date, Sales Rep Number, Points Deducted, Invoice Number, Amount Deducted"
     )
-    
+
     st.markdown("---")
     st.markdown("### ℹ️ Instructions")
     st.markdown("""
-    1. Upload your **MMS Sales Tracker.xlsx** file.
+    1. Upload your **MMS Sales Tracker.xlsx** file **OR** click the **Fetch from KoboToolbox** button.
     2. (Optional) Upload a **Deductions.xlsx** file to apply returns.
     3. Use the filters below to narrow down by date and branch.
     4. The dashboard will automatically update with net points and sales after deductions.
@@ -83,23 +101,31 @@ with st.sidebar:
 st.title("📊 MMS Sales Dashboard")
 st.markdown("---")
 
-# Data processing functions
+# ========== DATA PROCESSING FUNCTIONS ==========
 def process_sales_file(uploaded_file):
+    r"""Reads the sales Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
     try:
         df = pd.read_excel(uploaded_file)
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
         df = df.dropna(subset=['Amount', 'Sales Rep Number'])
         df['Date'] = pd.to_datetime(df['Date'])
+
+        # Replace / and \ with ; in Sales Rep Number and normalize as string
+        df['Sales Rep Number'] = df['Sales Rep Number'].astype(str).str.replace('/', ';', regex=False).str.replace('\\', ';', regex=False)
         df_original = df.copy()
-        
+
         # Explode for per‑rep analysis (split amounts equally)
         df_exploded = df.copy()
-        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(str)
         df_exploded['rep_count'] = df_exploded['Sales Rep Number'].str.split(';').apply(len)
         df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.split(';')
         df_exploded = df_exploded.explode('Sales Rep Number')
         df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.strip()
         df_exploded = df_exploded[df_exploded['Sales Rep Number'] != '']
+        # Convert to numeric, coercing errors to NaN
+        df_exploded['Sales Rep Number'] = pd.to_numeric(df_exploded['Sales Rep Number'], errors='coerce')
+        df_exploded = df_exploded.dropna(subset=['Sales Rep Number'])
+        # Convert to integer
+        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(int)
         df_exploded['Split Amount'] = df_exploded['Amount'] / df_exploded['rep_count']
         return df_original, df_exploded
     except Exception as e:
@@ -107,6 +133,7 @@ def process_sales_file(uploaded_file):
         return None, None
 
 def process_deductions_file(uploaded_file):
+    r"""Reads the deductions Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
     try:
         df = pd.read_excel(uploaded_file)
         required_cols = ['Date', 'Sales Rep Number', 'Points Deducted', 'Invoice Number', 'Amount Deducted']
@@ -117,15 +144,22 @@ def process_deductions_file(uploaded_file):
         df['Amount Deducted'] = pd.to_numeric(df['Amount Deducted'], errors='coerce')
         df = df.dropna(subset=['Sales Rep Number', 'Points Deducted', 'Invoice Number', 'Amount Deducted'])
         df['Date'] = pd.to_datetime(df['Date'])
-        
+
+        # Replace / and \ with ; in Sales Rep Number
+        df['Sales Rep Number'] = df['Sales Rep Number'].astype(str).str.replace('/', ';', regex=False).str.replace('\\', ';', regex=False)
+
         # Explode for per‑rep deductions
         df_exploded = df.copy()
-        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(str)
         df_exploded['rep_count'] = df_exploded['Sales Rep Number'].str.split(';').apply(len)
         df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.split(';')
         df_exploded = df_exploded.explode('Sales Rep Number')
         df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].str.strip()
         df_exploded = df_exploded[df_exploded['Sales Rep Number'] != '']
+        # Convert to numeric, coercing errors to NaN
+        df_exploded['Sales Rep Number'] = pd.to_numeric(df_exploded['Sales Rep Number'], errors='coerce')
+        df_exploded = df_exploded.dropna(subset=['Sales Rep Number'])
+        # Convert to integer
+        df_exploded['Sales Rep Number'] = df_exploded['Sales Rep Number'].astype(int)
         # Split points and amount equally among reps
         df_exploded['Points Deducted'] = df_exploded['Points Deducted'] / df_exploded['rep_count']
         df_exploded['Amount Deducted'] = df_exploded['Amount Deducted'] / df_exploded['rep_count']
@@ -134,16 +168,30 @@ def process_deductions_file(uploaded_file):
         st.error(f"Error reading deductions file: {e}")
         return None, None
 
-# Load sales data
+# ========== DETERMINE DATA SOURCE ==========
 if uploaded_file is not None:
-    df_sales_orig, df_sales_exp = process_sales_file(uploaded_file)
-    if df_sales_orig is None or df_sales_exp is None:
+    # Manual upload takes precedence
+    st.session_state.api_data = None
+    st.session_state.manual_upload_used = True
+    try:
+        df_raw = pd.read_excel(uploaded_file)
+        df_sales_orig, df_sales_exp = process_sales_file(uploaded_file)
+    except Exception as e:
+        st.error(f"Error reading uploaded file: {e}")
+        st.stop()
+elif 'api_data' in st.session_state and st.session_state.api_data is not None:
+    # Use the API data if it exists
+    buffer = io.BytesIO()
+    st.session_state.api_data.to_excel(buffer, index=False)
+    buffer.seek(0)
+    df_sales_orig, df_sales_exp = process_sales_file(buffer)
+    if df_sales_orig is None:
         st.stop()
 else:
-    st.info("👈 Please upload an MMS Sales Tracker Excel file using the sidebar to begin.")
+    st.info("👈 Please upload an MMS Sales Tracker Excel file or click the Fetch from KoboToolbox button to begin.")
     st.stop()
 
-# Load deductions data if provided
+# ========== DEDUCTIONS PROCESSING ==========
 if deductions_file is not None:
     df_ded_orig, df_ded_exp = process_deductions_file(deductions_file)
     if df_ded_orig is None or df_ded_exp is None:
@@ -154,10 +202,15 @@ else:
     df_ded_orig = pd.DataFrame()
     df_ded_exp = pd.DataFrame()
 
-# ----- FILTERS -----
+# ========== FILTERS ==========
 st.sidebar.markdown("### 🔍 Filters")
 
-# Date range filter (apply to both sales and deductions)
+# Check if sales data is valid
+if df_sales_orig is None or df_sales_orig.empty or df_sales_orig['Date'].isna().all():
+    st.error("No valid sales data with dates found. Please check your uploaded file or API data.")
+    st.stop()
+
+# Date range filter
 min_date = df_sales_orig['Date'].min().date()
 max_date = df_sales_orig['Date'].max().date()
 date_range = st.sidebar.date_input(
@@ -171,7 +224,7 @@ if len(date_range) == 2:
 else:
     start_date, end_date = min_date, max_date
 
-# Branch filter (sales only)
+# Branch filter
 branches = st.sidebar.multiselect(
     "Branch",
     options=sorted(df_sales_orig['Branch'].unique()),
@@ -206,19 +259,16 @@ else:
     df_ded_orig_filtered = pd.DataFrame()
     df_ded_exp_filtered = pd.DataFrame()
 
-# Check if sales data is empty after filters
 if df_sales_orig_filtered.empty:
     st.warning("No sales data matches the selected filters. Please adjust your filter criteria.")
     st.stop()
 
-# ----- COMPUTE STATISTICS -----
-# Sales stats (per rep)
+# ========== COMPUTE STATISTICS ==========
 sales_rep_stats = df_sales_exp_filtered.groupby('Sales Rep Number').agg(
     invoice_count=('Invoice Number', 'count'),
     total_sales=('Split Amount', 'sum')
 ).reset_index()
 
-# Deduction stats (per rep) if available
 if has_deductions and not df_ded_exp_filtered.empty:
     ded_rep_stats = df_ded_exp_filtered.groupby('Sales Rep Number').agg(
         returned_invoice_count=('Invoice Number', 'count'),
@@ -228,23 +278,18 @@ if has_deductions and not df_ded_exp_filtered.empty:
 else:
     ded_rep_stats = pd.DataFrame(columns=['Sales Rep Number', 'returned_invoice_count', 'total_points_deducted', 'total_amount_deducted'])
 
-# Merge sales and deductions
 rep_stats_merged = pd.merge(sales_rep_stats, ded_rep_stats, on='Sales Rep Number', how='left').fillna(0)
-
-# Compute net values
 rep_stats_merged['net_points'] = rep_stats_merged['invoice_count'] - 2 * rep_stats_merged['returned_invoice_count']
 rep_stats_merged['net_sales'] = rep_stats_merged['total_sales'] - rep_stats_merged['total_amount_deducted']
 
-# Sort for charts
 rep_stats_net_sales = rep_stats_merged.sort_values('net_sales', ascending=False)
 rep_stats_net_points = rep_stats_merged.sort_values('net_points', ascending=False)
 
-# Overall metrics
-total_sales_net = rep_stats_merged['net_sales'].sum()  # sum of net sales across reps (should equal filtered total minus returns)
-total_invoices_orig = len(df_sales_orig_filtered)  # original invoice count (including returned)
+total_sales_net = rep_stats_merged['net_sales'].sum()
+total_invoices_orig = len(df_sales_orig_filtered)
 total_sales_reps = rep_stats_merged['Sales Rep Number'].nunique()
 
-# ----- METRICS ROW -----
+# ========== METRICS ROW ==========
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(label="💰 Total Sales (net)", value=f"${total_sales_net:,.2f}")
@@ -255,12 +300,49 @@ with col3:
 
 st.markdown("---")
 
-# ----- COMBO CHART: Net Points vs Net Sales -----
+# ========== DAILY SALES CHART ==========
+st.subheader("📅 Total Sales by Day")
+if not df_sales_orig_filtered.empty:
+    daily_sales = df_sales_orig_filtered.groupby(df_sales_orig_filtered['Date'].dt.date)['Amount'].sum().reset_index()
+    daily_sales.columns = ['Date', 'Total Sales']
+    daily_sales = daily_sales.sort_values('Date')
+
+    max_sales = daily_sales['Total Sales'].max()
+    y_max = max_sales * 1.20 if max_sales > 0 else 100
+
+    fig_daily = px.line(
+        daily_sales,
+        x='Date',
+        y='Total Sales',
+        markers=True,
+        labels={'Total Sales': 'Total Sales ($)', 'Date': 'Date'},
+        color_discrete_sequence=['#2ca02c']
+    )
+    fig_daily.update_traces(
+        mode='lines+markers+text',
+        text=daily_sales['Total Sales'].round(2),
+        texttemplate='$%{text}',
+        textposition='top center',
+        textfont=dict(size=11, color='black'),
+        cliponaxis=False
+    )
+    fig_daily.update_layout(
+        height=450,
+        margin=dict(l=20, r=20, t=50, b=50),
+        plot_bgcolor='white',
+        hovermode='x unified',
+        xaxis=dict(tickangle=-45, automargin=True, tickfont=dict(size=10)),
+        yaxis=dict(range=[0, y_max], automargin=True, tickfont=dict(size=10))
+    )
+    st.plotly_chart(fig_daily, width='stretch')
+else:
+    st.info("No sales data for daily chart.")
+st.markdown("---")
+
+# ========== COMBO CHART: Net Points vs Net Sales ==========
 st.subheader("📊 Net Points vs Net Sales by Sales Rep")
 if not rep_stats_net_sales.empty:
     fig_combo = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    # Bar trace for net points (primary y-axis)
     fig_combo.add_trace(
         go.Bar(
             x=rep_stats_net_sales['Sales Rep Number'],
@@ -274,8 +356,6 @@ if not rep_stats_net_sales.empty:
         ),
         secondary_y=False
     )
-    
-    # Line trace for net sales (secondary y-axis) with labels
     fig_combo.add_trace(
         go.Scatter(
             x=rep_stats_net_sales['Sales Rep Number'],
@@ -293,82 +373,105 @@ if not rep_stats_net_sales.empty:
         ),
         secondary_y=True
     )
-    
     fig_combo.update_layout(
         height=500,
         margin=dict(l=20, r=80, t=30, b=120),
         plot_bgcolor='white',
         hovermode='x unified',
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="center",
-            x=0.5
-        ),
-        xaxis=dict(
-            type='category',
-            tickangle=-45,
-            automargin=True,
-            tickfont=dict(size=10)
-        )
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        xaxis=dict(type='category', tickangle=-45, automargin=True, tickfont=dict(size=10))
     )
-    
     fig_combo.update_yaxes(title_text="Net Points", secondary_y=False)
     fig_combo.update_yaxes(title_text="Net Sales ($)", secondary_y=True, title_font=dict(size=12))
-    
     st.plotly_chart(fig_combo, width='stretch')
 else:
     st.info("No data for combo chart.")
 st.markdown("---")
 
-# ----- CHARTS (using net values) -----
-st.subheader("💰 Net Sales by Sales Rep ")
+# ========== NET SALES BAR CHART ==========
+st.subheader("💰 Net Sales by Sales Rep")
 if not rep_stats_net_sales.empty:
+    sales_rep_labels = rep_stats_net_sales['Sales Rep Number'].astype(str)
+    display_text = rep_stats_net_sales['net_sales'].round(2)
+
     fig_sales = px.bar(
         rep_stats_net_sales,
-        x='Sales Rep Number',
+        x=sales_rep_labels,
         y='net_sales',
         color_discrete_sequence=['#e6550d'],
-        text=rep_stats_net_sales['net_sales'].round(2),
-        labels={'net_sales': 'Net Sales ($)', 'Sales Rep Number': 'Sales Rep'}
+        text=display_text,
+        labels={'net_sales': 'Net Sales ($)', 'x': 'Sales Rep'}
     )
-    fig_sales.update_traces(texttemplate='$%{text}', textposition='outside', textfont=dict(size=11, color='#8b2c0d'))
+    fig_sales.update_traces(
+        texttemplate='$%{text}',
+        textposition='outside',
+        cliponaxis=False,
+        textfont=dict(size=10, color='#8b2c0d'),
+        marker_line_color='rgba(0,0,0,0.08)',
+        marker_line_width=1
+    )
     fig_sales.update_layout(
-        height=450, margin=dict(l=20, r=20, t=30, b=120),
-        plot_bgcolor='white', hovermode='x unified',
-        xaxis=dict(type='category', tickangle=-45, automargin=True, tickfont=dict(size=10))
+        height=500,
+        margin=dict(l=20, r=20, t=35, b=130),
+        plot_bgcolor='white',
+        hovermode='x unified',
+        xaxis=dict(
+            type='category',
+            tickangle=-45,
+            automargin=True,
+            tickfont=dict(size=10),
+            title='Sales Rep'
+        ),
+        yaxis=dict(title='Net Sales ($)', tickprefix='$', tickformat=',.2f')
     )
-    st.plotly_chart(fig_sales, width='stretch')
+    st.plotly_chart(fig_sales, use_container_width=True)
 else:
     st.info("No net sales data for the selected filters.")
 
+# ========== NET POINTS BAR CHART ==========
 st.subheader("⭐ Net Points by Sales Rep")
 if not rep_stats_net_points.empty:
+    sales_rep_labels = rep_stats_net_points['Sales Rep Number'].astype(str)
     fig_points = px.bar(
         rep_stats_net_points,
-        x='Sales Rep Number',
+        x=sales_rep_labels,
         y='net_points',
         color_discrete_sequence=['#3182bd'],
         text='net_points',
-        labels={'net_points': 'Net Points', 'Sales Rep Number': 'Sales Rep'}
+        labels={'net_points': 'Net Points', 'x': 'Sales Rep'}
     )
-    fig_points.update_traces(textposition='outside', textfont=dict(size=11, color='#1e3c72'))
+    fig_points.update_traces(
+        texttemplate='%{text}',
+        textposition='outside',
+        cliponaxis=False,
+        textfont=dict(size=11, color='#1e3c72'),
+        marker_line_color='rgba(0,0,0,0.08)',
+        marker_line_width=1
+    )
     fig_points.update_layout(
-        height=450, margin=dict(l=20, r=20, t=30, b=120),
-        plot_bgcolor='white', hovermode='x unified',
-        xaxis=dict(type='category', tickangle=-45, automargin=True, tickfont=dict(size=10))
+        height=500,
+        margin=dict(l=20, r=20, t=35, b=130),
+        plot_bgcolor='white',
+        hovermode='x unified',
+        xaxis=dict(
+            type='category',
+            tickangle=-45,
+            automargin=True,
+            tickfont=dict(size=10),
+            title='Sales Rep'
+        ),
+        yaxis=dict(title='Net Points', automargin=True)
     )
-    st.plotly_chart(fig_points, width='stretch')
+    st.plotly_chart(fig_points, use_container_width=True)
 else:
     st.info("No net points data for the selected filters.")
-
 st.markdown("---")
 
-# ----- SUMMARY TABLE (net) -----
+# ========== SUMMARY TABLE ==========
 st.subheader("📋 Sales Rep Summary (Sorted by Net Sales)")
 if not rep_stats_net_sales.empty:
     display_df = rep_stats_net_sales[['Sales Rep Number', 'net_points', 'net_sales']].copy()
+    display_df['Sales Rep Number'] = display_df['Sales Rep Number'].astype(int)
     display_df['net_sales'] = display_df['net_sales'].map('${:,.2f}'.format)
     display_df.columns = ['Sales Rep', 'Net Points', 'Net Sales']
     st.dataframe(
@@ -376,19 +479,20 @@ if not rep_stats_net_sales.empty:
         width='stretch',
         hide_index=True,
         column_config={
-            "Sales Rep": st.column_config.TextColumn("Sales Rep"),
+            "Sales Rep": st.column_config.NumberColumn("Sales Rep", format="%d"),
             "Net Points": st.column_config.NumberColumn("Net Points", format="%d"),
             "Net Sales": st.column_config.TextColumn("Net Sales"),
         }
     )
 else:
     st.info("No rep data for the selected filters.")
-    
-# ----- TOP 10 INVOICES (original sales) -----
+
+# ========== TOP 10 INVOICES ==========
 st.subheader("🏆 Top 10 Invoices by Amount (Original)")
 if not df_sales_orig_filtered.empty:
     top_invoices = df_sales_orig_filtered.nlargest(10, 'Amount')[['Invoice Number', 'Amount', 'Sales Rep Number', 'Branch']].reset_index(drop=True)
     top_invoices_display = top_invoices.copy()
+    top_invoices_display['Sales Rep Number'] = top_invoices_display['Sales Rep Number'].astype(str)
     top_invoices_display['Amount'] = top_invoices_display['Amount'].map('${:,.2f}'.format)
     top_invoices_display.columns = ['Invoice Number', 'Amount', 'Sales Rep(s)', 'Branch']
     st.dataframe(
@@ -405,16 +509,46 @@ if not df_sales_orig_filtered.empty:
 else:
     st.info("No invoices for the selected filters.")
 
-# ----- DEDUCTIONS SECTION (if deductions exist) -----
+# ========== DUPLICATE INVOICES SECTION ==========
+st.markdown("---")
+st.subheader("⚠️ Duplicate Invoices")
+if not df_sales_orig_filtered.empty:
+    # Identify invoice numbers that appear more than once
+    duplicate_mask = df_sales_orig_filtered.duplicated(subset=['Invoice Number'], keep=False)
+    duplicates_df = df_sales_orig_filtered[duplicate_mask].copy()
+    if not duplicates_df.empty:
+        # Select and reorder columns for display
+        dup_display = duplicates_df[['Date', 'Sales Rep Number', 'Invoice Number', 'Amount']].copy()
+        dup_display['Date'] = dup_display['Date'].dt.date
+        dup_display['Sales Rep Number'] = dup_display['Sales Rep Number'].astype(str)
+        dup_display['Amount'] = dup_display['Amount'].map('${:,.2f}'.format)
+        dup_display = dup_display.sort_values(['Invoice Number', 'Date'])
+        st.dataframe(
+            dup_display,
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date"),
+                "Sales Rep Number": st.column_config.TextColumn("Sales Rep(s)"),
+                "Invoice Number": st.column_config.TextColumn("Invoice Number"),
+                "Amount": st.column_config.TextColumn("Amount"),
+            }
+        )
+        st.caption(f"Found {len(duplicates_df)} rows belonging to duplicate invoices.")
+    else:
+        st.success("No duplicate invoices found in the filtered data.")
+else:
+    st.info("No sales data to check for duplicates.")
+
+# ========== DEDUCTIONS SECTION (if deductions exist) ==========
 if has_deductions and not df_ded_exp_filtered.empty:
     st.markdown("---")
     st.subheader("📉 Deductions Overview")
-    
     col_ded1, col_ded2 = st.columns(2)
-    
     with col_ded1:
         st.subheader("Points Deductions by Sales Rep")
         ded_display = ded_rep_stats[['Sales Rep Number', 'total_points_deducted', 'total_amount_deducted']].copy()
+        ded_display['Sales Rep Number'] = ded_display['Sales Rep Number'].astype(int)
         ded_display['total_amount_deducted'] = ded_display['total_amount_deducted'].map('${:,.2f}'.format)
         ded_display.columns = ['Sales Rep', 'Points Deducted', 'Amount Deducted']
         st.dataframe(
@@ -422,17 +556,15 @@ if has_deductions and not df_ded_exp_filtered.empty:
             width='stretch',
             hide_index=True,
             column_config={
-                "Sales Rep": st.column_config.TextColumn("Sales Rep"),
+                "Sales Rep": st.column_config.NumberColumn("Sales Rep", format="%d"),
                 "Points Deducted": st.column_config.NumberColumn("Points Deducted", format="%d"),
                 "Amount Deducted": st.column_config.TextColumn("Amount Deducted"),
             }
         )
-    
     with col_ded2:
         st.subheader("Amount Deducted by Invoice")
-        # Aggregate deductions by invoice (total per invoice)
         invoice_ded = df_ded_orig_filtered.groupby('Invoice Number')['Amount Deducted'].sum().reset_index()
-        invoice_ded = invoice_ded.sort_values('Amount Deducted', ascending=False).head(20)  # top 20 for readability
+        invoice_ded = invoice_ded.sort_values('Amount Deducted', ascending=False).head(20)
         fig_ded = px.bar(
             invoice_ded,
             x='Invoice Number',
@@ -452,18 +584,33 @@ if has_deductions and not df_ded_exp_filtered.empty:
 
 st.markdown("---")
 
-# Download summary CSV (net)
+# ========== CSV DOWNLOAD ==========
 csv = rep_stats_net_sales[['Sales Rep Number', 'net_points', 'net_sales']].to_csv(index=False).encode('utf-8')
 st.download_button(label="📥 Download Summary as CSV", data=csv, file_name="sales_rep_summary_net.csv", mime="text/csv")
 
-# ----- EXPORT HTML (with all data) -----
+# ========== HTML EXPORT ==========
 def generate_export_html():
+    # Duplicate invoices HTML
+    if not df_sales_orig_filtered.empty:
+        dup_mask = df_sales_orig_filtered.duplicated(subset=['Invoice Number'], keep=False)
+        dup_df = df_sales_orig_filtered[dup_mask].copy()
+        if not dup_df.empty:
+            dup_display = dup_df[['Date', 'Sales Rep Number', 'Invoice Number', 'Amount']].copy()
+            dup_display['Date'] = dup_display['Date'].dt.date
+            dup_display['Amount'] = dup_display['Amount'].map('${:,.2f}'.format)
+            dup_display = dup_display.sort_values(['Invoice Number', 'Date'])
+            dup_html = dup_display.to_html(index=False, escape=False, classes='duplicate-table')
+        else:
+            dup_html = "<p>No duplicate invoices found.</p>"
+    else:
+        dup_html = "<p>No sales data to check for duplicates.</p>"
+
     # Combo chart HTML
     if not rep_stats_net_sales.empty:
         combo_html = fig_combo.to_html(include_plotlyjs=False, full_html=False)
     else:
         combo_html = "<p>No combo data</p>"
-    
+
     # Summary table HTML
     table_html = rep_stats_net_sales[['Sales Rep Number', 'net_points', 'net_sales']].copy()
     table_html['net_sales'] = table_html['net_sales'].map('${:,.2f}'.format)
@@ -476,7 +623,7 @@ def generate_export_html():
     top_invoices_html.columns = ['Invoice Number', 'Amount', 'Sales Rep(s)', 'Branch']
     top_invoices_html = top_invoices_html.to_html(index=False, escape=False, classes='top-invoices-table')
 
-    # Deductions table and chart HTML (if any)
+    # Deductions table and chart HTML
     ded_section = ""
     if has_deductions and not df_ded_exp_filtered.empty:
         ded_table_html = ded_rep_stats[['Sales Rep Number', 'total_points_deducted', 'total_amount_deducted']].copy()
@@ -509,9 +656,10 @@ def generate_export_html():
         </div>
         """
 
-    # Charts
+    # Other charts
     sales_html = fig_sales.to_html(include_plotlyjs=False, full_html=False) if not rep_stats_net_sales.empty else "<p>No data</p>"
     points_html = fig_points.to_html(include_plotlyjs=False, full_html=False) if not rep_stats_net_points.empty else "<p>No data</p>"
+    daily_html = fig_daily.to_html(include_plotlyjs=False, full_html=False) if not df_sales_orig_filtered.empty else "<p>No daily data</p>"
 
     html_template = f"""
     <!DOCTYPE html>
@@ -582,24 +730,24 @@ def generate_export_html():
                 margin-bottom: 20px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             }}
-            .summary-table, .top-invoices-table, .deductions-table {{
+            .summary-table, .top-invoices-table, .deductions-table, .duplicate-table {{
                 width: 100%;
                 border-collapse: collapse;
             }}
-            .summary-table th, .top-invoices-table th, .deductions-table th {{
+            .summary-table th, .top-invoices-table th, .deductions-table th, .duplicate-table th {{
                 background-color: #1e3c72;
                 color: white;
                 padding: 12px;
                 text-align: left;
             }}
-            .summary-table td, .top-invoices-table td, .deductions-table td {{
+            .summary-table td, .top-invoices-table td, .deductions-table td, .duplicate-table td {{
                 padding: 10px 12px;
                 border-bottom: 1px solid #ddd;
             }}
-            .summary-table tr:nth-child(even), .top-invoices-table tr:nth-child(even), .deductions-table tr:nth-child(even) {{
+            .summary-table tr:nth-child(even), .top-invoices-table tr:nth-child(even), .deductions-table tr:nth-child(even), .duplicate-table tr:nth-child(even) {{
                 background-color: #f5f7fa;
             }}
-            .summary-table tr:hover, .top-invoices-table tr:hover, .deductions-table tr:hover {{
+            .summary-table tr:hover, .top-invoices-table tr:hover, .deductions-table tr:hover, .duplicate-table tr:hover {{
                 background-color: #e9ecef;
             }}
         </style>
@@ -622,6 +770,10 @@ def generate_export_html():
                 </div>
             </div>
             <div class="chart-container">
+                <h3>📅 Total Sales by Day</h3>
+                {daily_html}
+            </div>
+            <div class="chart-container">
                 <h3>📊 Net Points vs Net Sales by Sales Rep</h3>
                 {combo_html}
             </div>
@@ -637,18 +789,21 @@ def generate_export_html():
                 <h3>📋 Sales Rep Summary (Sorted by Net Sales)</h3>
                 {table_html}
             </div>
-            {ded_section}
+            <div class="table-container">
+                <h3>⚠️ Duplicate Invoices</h3>
+                {dup_html}
+            </div>
             <div class="table-container">
                 <h3>🏆 Top 10 Invoices by Amount (Original)</h3>
                 {top_invoices_html}
             </div>
+            {ded_section}
         </div>
     </body>
     </html>
     """
     return html_template
 
-# HTML export button
 with st.sidebar:
     st.markdown("---")
     st.download_button(
@@ -659,7 +814,7 @@ with st.sidebar:
         help="Download an interactive HTML version of the dashboard (charts remain interactive)."
     )
 
-# PDF export
+# ========== PDF EXPORT ==========
 async def generate_pdf_from_html(html_content: str) -> bytes:
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
