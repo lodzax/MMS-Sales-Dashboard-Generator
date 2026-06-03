@@ -8,14 +8,15 @@ import sys
 import requests
 import io
 from playwright.async_api import async_playwright
-import nest_asyncio
-from datetime import datetime
 
 # Windows asyncio fix
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-nest_asyncio.apply()
+def stop_script():
+    st.stop()
+    if not st.runtime.exists():
+        sys.exit(0)
 
 st.set_page_config(
     page_title="MMS Sales Dashboard",
@@ -103,7 +104,7 @@ st.markdown("---")
 
 # ========== DATA PROCESSING FUNCTIONS ==========
 def process_sales_file(uploaded_file):
-    """Reads the sales Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
+    r"""Reads the sales Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
     try:
         df = pd.read_excel(uploaded_file)
         df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
@@ -130,7 +131,7 @@ def process_sales_file(uploaded_file):
         return None, None
 
 def process_deductions_file(uploaded_file):
-    """Reads the deductions Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
+    r"""Reads the deductions Excel, cleans Sales Rep Number (replace / and \ with ;, then convert to int)."""
     try:
         df = pd.read_excel(uploaded_file)
         required_cols = ['Date', 'Sales Rep Number', 'Points Deducted', 'Invoice Number', 'Amount Deducted']
@@ -163,6 +164,9 @@ def process_deductions_file(uploaded_file):
         return None, None
 
 # ========== DETERMINE DATA SOURCE ==========
+df_sales_orig = None
+df_sales_exp = None
+
 if uploaded_file is not None:
     # Manual upload takes precedence
     st.session_state.api_data = None
@@ -172,27 +176,34 @@ if uploaded_file is not None:
         df_sales_orig, df_sales_exp = process_sales_file(uploaded_file)
     except Exception as e:
         st.error(f"Error reading uploaded file: {e}")
-        st.stop()
+        stop_script()
 elif 'api_data' in st.session_state and st.session_state.api_data is not None:
     # Use the API data if it exists
     buffer = io.BytesIO()
     st.session_state.api_data.to_excel(buffer, index=False)
     buffer.seek(0)
     df_sales_orig, df_sales_exp = process_sales_file(buffer)
+    if df_sales_orig is None:
+        stop_script()
 else:
     st.info("👈 Please upload an MMS Sales Tracker Excel file or click the Fetch from KoboToolbox button to begin.")
-    st.stop()
+    stop_script()
 
 # ========== DEDUCTIONS PROCESSING ==========
 if deductions_file is not None:
     df_ded_orig, df_ded_exp = process_deductions_file(deductions_file)
     if df_ded_orig is None or df_ded_exp is None:
-        st.stop()
+        stop_script()
     has_deductions = True
 else:
     has_deductions = False
     df_ded_orig = pd.DataFrame()
     df_ded_exp = pd.DataFrame()
+
+# Check if sales data is valid
+if df_sales_orig is None or df_sales_orig.empty or df_sales_orig['Date'].isna().all():
+    st.error("No valid sales data with dates found. Please check your uploaded file or API data.")
+    stop_script()
 
 # ========== FILTERS ==========
 st.sidebar.markdown("### 🔍 Filters")
@@ -248,7 +259,7 @@ else:
 
 if df_sales_orig_filtered.empty:
     st.warning("No sales data matches the selected filters. Please adjust your filter criteria.")
-    st.stop()
+    stop_script()
 
 # ========== COMPUTE STATISTICS ==========
 sales_rep_stats = df_sales_exp_filtered.groupby('Sales Rep Number').agg(
@@ -775,11 +786,23 @@ async def generate_pdf_from_html(html_content: str) -> bytes:
 def export_as_pdf():
     html_string = generate_export_html()
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        pdf_data = loop.run_until_complete(generate_pdf_from_html(html_string))
-        loop.close()
-        return pdf_data
+        import threading
+        res = []
+        err = []
+        def worker():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                res.append(loop.run_until_complete(generate_pdf_from_html(html_string)))
+                loop.close()
+            except Exception as e:
+                err.append(e)
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        if err:
+            raise err[0]
+        return res[0]
     except Exception as e:
         st.error(f"PDF generation failed: {e}\n\nMake sure Playwright is installed: `pip install playwright && playwright install chromium`")
         return None
